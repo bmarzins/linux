@@ -420,6 +420,7 @@ int blkdev_report_zones(struct block_device *bdev, sector_t sector,
 int blkdev_zone_mgmt(struct block_device *bdev, enum req_op op,
 		sector_t sectors, sector_t nr_sectors);
 int blk_revalidate_disk_zones(struct gendisk *disk);
+bool disk_has_plugged_zones(struct gendisk *disk);
 
 /*
  * Independent access ranges: struct blk_independent_access_range describes
