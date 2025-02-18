@@ -1363,24 +1363,23 @@ static unsigned int disk_set_conv_zones_bitmap(struct gendisk *disk,
 
 void disk_free_zone_resources(struct gendisk *disk)
 {
-	if (!disk->zone_wplugs_pool)
-		return;
+	if (disk->zone_wplugs_pool) {
+		if (disk->zone_wplugs_wq) {
+			destroy_workqueue(disk->zone_wplugs_wq);
+			disk->zone_wplugs_wq = NULL;
+		}
 
-	if (disk->zone_wplugs_wq) {
-		destroy_workqueue(disk->zone_wplugs_wq);
-		disk->zone_wplugs_wq = NULL;
+		disk_destroy_zone_wplugs_hash_table(disk);
+
+		/*
+		 * Wait for the zone write plugs to be RCU-freed before
+		 * destorying the mempool.
+		 */
+		rcu_barrier();
+
+		mempool_destroy(disk->zone_wplugs_pool);
+		disk->zone_wplugs_pool = NULL;
 	}
-
-	disk_destroy_zone_wplugs_hash_table(disk);
-
-	/*
-	 * Wait for the zone write plugs to be RCU-freed before
-	 * destorying the mempool.
-	 */
-	rcu_barrier();
-
-	mempool_destroy(disk->zone_wplugs_pool);
-	disk->zone_wplugs_pool = NULL;
 
 	disk_set_conv_zones_bitmap(disk, NULL);
 	disk->zone_capacity = 0;
@@ -1658,11 +1657,11 @@ int blk_revalidate_disk_zones(struct gendisk *disk)
 	sector_t zone_sectors = q->limits.chunk_sectors;
 	sector_t capacity = get_capacity(disk);
 	struct blk_revalidate_zone_args args = { };
-	unsigned int noio_flag;
-	int ret = -ENOMEM;
+	unsigned int noio_flag, memflags;
+	int ret = 0;
 
-	if (WARN_ON_ONCE(!blk_queue_is_zoned(q)))
-		return -EIO;
+	if (!blk_queue_is_zoned(q))
+		goto free_zoned;
 
 	if (!capacity)
 		return -ENODEV;
@@ -1716,12 +1715,12 @@ int blk_revalidate_disk_zones(struct gendisk *disk)
 		ret = disk_update_zone_resources(disk, &args);
 	else
 		pr_warn("%s: failed to revalidate zones\n", disk->disk_name);
-	if (ret) {
-		unsigned int memflags = blk_mq_freeze_queue(q);
-
-		disk_free_zone_resources(disk);
-		blk_mq_unfreeze_queue(q, memflags);
-	}
+	if (!ret)
+		return 0;
+free_zoned:
+	memflags = blk_mq_freeze_queue(q);
+	disk_free_zone_resources(disk);
+	blk_mq_unfreeze_queue(q, memflags);
 
 	return ret;
 }
