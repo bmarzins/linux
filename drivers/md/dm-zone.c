@@ -158,6 +158,20 @@ int dm_revalidate_zones(struct dm_table *t, struct request_queue *q)
 	if (!get_capacity(disk))
 		return 0;
 
+	if (!blk_queue_is_zoned(q)) {
+		if (disk->nr_zones) {
+			/* We cannot call blk_revalidate_disk_zones() if there
+			 * are plugged zone writes. If we do, we will hang
+			 * when freezing the queue. In that case, we just have
+			 * to leave the zoned settings in place, even though
+			 * the new table is not zoned.
+			 */
+			if (!disk_has_plugged_zones(disk))
+				blk_revalidate_disk_zones(disk);
+		}
+		return 0;
+	}
+
 	/* Revalidate only if something changed. */
 	if (!disk->nr_zones || disk->nr_zones != md->nr_zones) {
 		DMINFO("%s using %s zone append",

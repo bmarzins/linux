@@ -1888,17 +1888,14 @@ int dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 	 * Now that the limits are set, check the zones mapped by the table
 	 * and setup the resources for zone append emulation if necessary.
 	 */
-	if (IS_ENABLED(CONFIG_BLK_DEV_ZONED) &&
-	    (limits->features & BLK_FEAT_ZONED)) {
+	if (IS_ENABLED(CONFIG_BLK_DEV_ZONED)) {
 		r = dm_revalidate_zones(t, q);
 		if (r) {
 			queue_limits_set(q, &old_limits);
 			return r;
 		}
-	}
-
-	if (IS_ENABLED(CONFIG_BLK_DEV_ZONED))
 		dm_finalize_zone_settings(t, limits);
+	}
 
 	if (dm_table_supports_dax(t, device_not_dax_synchronous_capable))
 		set_dax_synchronous(t->md->dax_dev);
