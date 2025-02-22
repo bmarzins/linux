@@ -144,6 +144,22 @@ bool dm_is_zone_write(struct mapped_device *md, struct bio *bio)
 }
 
 /*
+ * If there are plugged zone bios, they will hold a reference on the
+ * request queue, keeping it from being freezable.
+ */
+static bool can_freeze_queue(struct request_queue *q)
+{
+	bool freezable = false;
+
+	blk_freeze_queue_start(q);
+	percpu_ref_switch_to_atomic_sync(&q->q_usage_counter);
+	if (percpu_ref_is_zero(&q->q_usage_counter))
+		freezable = true;
+	blk_mq_unfreeze_queue_nomemrestore(q);
+	return freezable;
+}
+
+/*
  * Revalidate the zones of a mapped device to initialize resource necessary
  * for zone append emulation. Note that we cannot simply use the block layer
  * blk_revalidate_disk_zones() function here as the mapped device is suspended
@@ -157,6 +173,20 @@ int dm_revalidate_zones(struct dm_table *t, struct request_queue *q)
 
 	if (!get_capacity(disk))
 		return 0;
+
+	if (!blk_queue_is_zoned(q)) {
+		if (disk->nr_zones) {
+			/* We cannot call blk_revalidate_disk_zones() if there
+			 * are plugged zone writes. If we do, we will hang
+			 * when freezing the queue. If the queue can't be
+			 * frozen, we just have to leave the zoned settings
+			 * in place, even though the new table is not zoned.
+			 */
+			if (can_freeze_queue(q))
+				blk_revalidate_disk_zones(disk);
+		}
+		return 0;
+	}
 
 	/* Revalidate only if something changed. */
 	if (!disk->nr_zones || disk->nr_zones != md->nr_zones) {
