@@ -56,7 +56,7 @@ int dm_blk_report_zones(struct gendisk *disk, sector_t sector,
 {
 	struct mapped_device *md = disk->private_data;
 	struct dm_table *map;
-	int srcu_idx, ret;
+	int srcu_idx, ret = -EIO;
 
 	if (!md->zone_revalidate_map) {
 		/* Regular user context */
@@ -64,17 +64,22 @@ int dm_blk_report_zones(struct gendisk *disk, sector_t sector,
 			return -EAGAIN;
 
 		map = dm_get_live_table(md, &srcu_idx);
-		if (!map)
-			return -EIO;
 	} else {
-		/* Zone revalidation during __bind() */
+		/*
+		 * Zone revalidation during __bind() in progress. However
+		 * this call may be from a different process, so guarantee
+		 * that zone_revalidate_map will not get freed during this
+		 * call, if __bind() fails.
+		 */
+		srcu_idx = srcu_read_lock(&md->io_barrier);
 		map = md->zone_revalidate_map;
 	}
 
-	ret = dm_blk_do_report_zones(md, map, sector, nr_zones, cb, data);
+	if (map)
+		ret = dm_blk_do_report_zones(md, map, sector, nr_zones, cb,
+					     data);
 
-	if (!md->zone_revalidate_map)
-		dm_put_live_table(md, srcu_idx);
+	dm_put_live_table(md, srcu_idx);
 
 	return ret;
 }
