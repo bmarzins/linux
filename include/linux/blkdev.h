@@ -195,7 +195,7 @@ struct gendisk {
 	unsigned int		nr_zones;
 	unsigned int		zone_capacity;
 	unsigned int		last_zone_capacity;
-	unsigned long __rcu	*conv_zones_bitmap;
+	unsigned long		*conv_zones_bitmap;
 	unsigned int            zone_wplugs_hash_bits;
 	spinlock_t              zone_wplugs_lock;
 	struct mempool_s	*zone_wplugs_pool;
@@ -421,6 +421,9 @@ int blkdev_zone_mgmt(struct block_device *bdev, enum req_op op,
 		sector_t sectors, sector_t nr_sectors);
 int blk_revalidate_disk_zones(struct gendisk *disk);
 bool disk_has_plugged_zones(struct gendisk *disk);
+void disk_destroy_unused_zone_wplugs_hash(struct hlist_head *hash,
+					  mempool_t *pool,
+					  unsigned int hash_size);
 
 /*
  * Independent access ranges: struct blk_independent_access_range describes

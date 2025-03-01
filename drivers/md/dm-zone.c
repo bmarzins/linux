@@ -148,6 +148,75 @@ bool dm_is_zone_write(struct mapped_device *md, struct bio *bio)
 	}
 }
 
+struct dm_zone_values {
+	struct mempool_s	*zone_wplugs_pool;
+	struct hlist_head	*zone_wplugs_hash;
+	struct workqueue_struct	*zone_wplugs_wq;
+	unsigned long		*conv_zones_bitmap;
+	unsigned int		nr_zones;
+	unsigned int		zone_capacity;
+	unsigned int		last_zone_capacity;
+	unsigned int		zone_wplugs_hash_bits;
+};
+
+static void backup_zone_values(struct gendisk *disk,
+			       struct dm_zone_values *old)
+{
+	if (disk->zone_wplugs_wq) {
+		/*
+		 * Make sure that disk_free_zone_wplug_rcu() has finished
+		 * freeing any unhashed zone write plugs
+		 */
+		flush_workqueue(disk->zone_wplugs_wq);
+		rcu_barrier();
+	}
+	old->zone_wplugs_pool = disk->zone_wplugs_pool;
+	disk->zone_wplugs_pool = NULL;
+	old->zone_wplugs_hash = disk->zone_wplugs_hash;
+	disk->zone_wplugs_hash = NULL;
+	old->zone_wplugs_wq = disk->zone_wplugs_wq;
+	disk->zone_wplugs_hash = NULL;
+	old->conv_zones_bitmap = disk->conv_zones_bitmap;
+	disk->conv_zones_bitmap = NULL;
+	old->nr_zones = disk->nr_zones;
+	disk->nr_zones = 0;
+	old->zone_capacity = disk->zone_capacity;
+	disk->zone_capacity = 0;
+	old->last_zone_capacity = disk->last_zone_capacity;
+	disk->last_zone_capacity = 0;
+	old->zone_wplugs_hash_bits = disk->zone_wplugs_hash_bits;
+	disk->zone_wplugs_hash_bits = 0;
+}
+
+static void restore_zone_values(struct gendisk *disk,
+				struct dm_zone_values *old)
+{
+	disk->nr_zones = old->nr_zones;
+	disk->zone_capacity = old->zone_capacity;
+	disk->last_zone_capacity = old->last_zone_capacity;
+	disk->conv_zones_bitmap = old->conv_zones_bitmap;
+	disk->zone_wplugs_hash_bits = old->zone_wplugs_hash_bits;
+	disk->zone_wplugs_pool = old->zone_wplugs_pool;
+	disk->zone_wplugs_hash = old->zone_wplugs_hash;
+	disk->zone_wplugs_wq = old->zone_wplugs_wq;
+}
+
+static void free_zone_values(struct dm_zone_values *old)
+{
+	unsigned int hash_size = 1U << old->zone_wplugs_hash_bits;
+
+	if (old->zone_wplugs_wq)
+		destroy_workqueue(old->zone_wplugs_wq);
+	if (old->zone_wplugs_hash)
+		disk_destroy_unused_zone_wplugs_hash(old->zone_wplugs_hash,
+						     old->zone_wplugs_pool,
+						     hash_size);
+	if (old->zone_wplugs_pool)
+		mempool_destroy(old->zone_wplugs_pool);
+	if (old->conv_zones_bitmap)
+		bitmap_free(old->conv_zones_bitmap);
+}
+
 /*
  * Revalidate the zones of a mapped device to initialize resource necessary
  * for zone append emulation. Note that we cannot simply use the block layer
@@ -158,6 +227,7 @@ int dm_revalidate_zones(struct dm_table *t, struct request_queue *q)
 {
 	struct mapped_device *md = t->md;
 	struct gendisk *disk = md->disk;
+	struct dm_zone_values old_values = {};
 	int ret;
 
 	if (!get_capacity(disk))
@@ -177,16 +247,16 @@ int dm_revalidate_zones(struct dm_table *t, struct request_queue *q)
 		return 0;
 	}
 
-	/* Revalidate only if something changed. */
-	if (!disk->nr_zones || disk->nr_zones != md->nr_zones) {
-		DMINFO("%s using %s zone append",
-		       disk->disk_name,
-		       queue_emulates_zone_append(q) ? "emulated" : "native");
-		md->nr_zones = 0;
-	}
 
-	if (md->nr_zones)
+	/* Revalidate only if there are no plugged zone writes */
+	if (disk->nr_zones && !disk_has_plugged_zones(disk))
+		backup_zone_values(disk, &old_values);
+
+	if (disk->nr_zones)
 		return 0;
+
+	DMINFO("%s using %s zone append", disk->disk_name,
+	       queue_emulates_zone_append(q) ? "emulated" : "native");
 
 	/*
 	 * Our table is not live yet. So the call to dm_get_live_table()
@@ -201,9 +271,11 @@ int dm_revalidate_zones(struct dm_table *t, struct request_queue *q)
 
 	if (ret) {
 		DMERR("Revalidate zones failed %d", ret);
+		restore_zone_values(disk, &old_values);
 		return ret;
 	}
 
+	free_zone_values(&old_values);
 	md->nr_zones = disk->nr_zones;
 
 	return 0;

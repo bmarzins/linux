@@ -1319,6 +1319,35 @@ free_hash:
 	return -ENOMEM;
 }
 
+/*
+ * This function is only for use by stacked device drivers (e.g. DM).
+ * The caller is responsible for making sure that the hash table
+ * and zoned write plugs are not in use and cannot be accessed while
+ * calling this function.
+ */
+void disk_destroy_unused_zone_wplugs_hash(struct hlist_head *hash,
+					  mempool_t *pool,
+					  unsigned int hash_size)
+{
+	struct blk_zone_wplug *zwplug;
+	unsigned int i;
+
+	if (!hash)
+		return;
+
+	for (i = 0; i < hash_size; i++) {
+		while (!hlist_empty(&hash[i])) {
+			zwplug = hlist_entry(hash[i].first,
+					     struct blk_zone_wplug, node);
+			WARN_ON_ONCE(!bio_list_empty(&zwplug->bio_list));
+			WARN_ON_ONCE(zwplug->flags & BLK_ZONE_WPLUG_PLUGGED);
+			mempool_free(zwplug, pool);
+		}
+	}
+	kfree(hash);
+}
+EXPORT_SYMBOL_GPL(disk_destroy_unused_zone_wplugs_hash);
+
 static void disk_destroy_zone_wplugs_hash_table(struct gendisk *disk)
 {
 	struct blk_zone_wplug *zwplug;
