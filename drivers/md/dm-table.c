@@ -1883,7 +1883,7 @@ int dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 	if (dm_table_supports_atomic_writes(t))
 		limits->features |= BLK_FEAT_ATOMIC_WRITES;
 
-	r = queue_limits_set(q, limits);
+	r = queue_limits_set(q, limits, NULL);
 	if (r)
 		return r;
 

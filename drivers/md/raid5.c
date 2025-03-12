@@ -7774,7 +7774,7 @@ static int raid5_set_limits(struct mddev *mddev)
 	/* No restrictions on the number of segments in the request */
 	lim.max_segments = USHRT_MAX;
 
-	return queue_limits_set(mddev->gendisk->queue, &lim);
+	return queue_limits_set(mddev->gendisk->queue, &lim, NULL);
 }
 
 static int raid5_run(struct mddev *mddev)

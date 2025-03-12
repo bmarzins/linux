@@ -81,7 +81,7 @@ static int linear_set_limits(struct mddev *mddev)
 		return err;
 	}
 
-	return queue_limits_set(mddev->gendisk->queue, &lim);
+	return queue_limits_set(mddev->gendisk->queue, &lim, NULL);
 }
 
 static struct linear_conf *linear_conf(struct mddev *mddev, int raid_disks)

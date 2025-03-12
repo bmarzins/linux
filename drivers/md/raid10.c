@@ -4024,7 +4024,7 @@ static int raid10_set_queue_limits(struct mddev *mddev)
 		queue_limits_cancel_update(mddev->gendisk->queue);
 		return err;
 	}
-	return queue_limits_set(mddev->gendisk->queue, &lim);
+	return queue_limits_set(mddev->gendisk->queue, &lim, NULL);
 }
 
 static int raid10_run(struct mddev *mddev)

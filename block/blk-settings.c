@@ -476,16 +476,21 @@ EXPORT_SYMBOL_GPL(queue_limits_commit_update_frozen);
  * queue_limits_set - apply queue limits to queue
  * @q:		queue to update
  * @lim:	limits to apply
+ * @old_lim:	store previous limits if non-null.
  *
- * Apply the limits in @lim that were freshly initialized to @q.
+ * Apply the limits in @lim that were freshly initialized to @q, and
+ * optionally return the previous limits in @old_lim.
  * To update existing limits use queue_limits_start_update() and
  * queue_limits_commit_update() instead.
  *
  * Returns 0 if successful, else a negative error code.
  */
-int queue_limits_set(struct request_queue *q, struct queue_limits *lim)
+int queue_limits_set(struct request_queue *q, struct queue_limits *lim,
+		     struct queue_limits *old_lim)
 {
 	mutex_lock(&q->limits_lock);
+	if (old_lim)
+		*old_lim = q->limits;
 	return queue_limits_commit_update(q, lim);
 }
 EXPORT_SYMBOL_GPL(queue_limits_set);

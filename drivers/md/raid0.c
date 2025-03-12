@@ -390,7 +390,7 @@ static int raid0_set_limits(struct mddev *mddev)
 		queue_limits_cancel_update(mddev->gendisk->queue);
 		return err;
 	}
-	return queue_limits_set(mddev->gendisk->queue, &lim);
+	return queue_limits_set(mddev->gendisk->queue, &lim, NULL);
 }
 
 static int raid0_run(struct mddev *mddev)
