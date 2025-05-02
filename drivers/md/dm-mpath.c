@@ -132,6 +132,8 @@ static void queue_if_no_path_timeout_work(struct timer_list *t);
 #define MPATHF_PG_INIT_DISABLED 4		/* pg_init is not currently allowed */
 #define MPATHF_PG_INIT_REQUIRED 5		/* pg_init needs calling? */
 #define MPATHF_PG_INIT_DELAY_RETRY 6		/* Delay pg_init retry? */
+#define MPATHF_DELAY_PG_SWITCH 7		/* Delay switching pg if it still has paths */
+#define MPATHF_NEED_PG_SWITCH 8			/* Need to switch pgs after the delay has ended */
 
 static bool mpath_double_check_test_bit(int MPATHF_bit, struct multipath *m)
 {
@@ -413,23 +415,7 @@ static struct pgpath *choose_pgpath(struct multipath *m, size_t nr_bytes)
 		goto failed;
 	}
 
-	/* Were we instructed to switch PG? */
-	if (READ_ONCE(m->next_pg)) {
-		spin_lock_irqsave(&m->lock, flags);
-		pg = m->next_pg;
-		if (!pg) {
-			spin_unlock_irqrestore(&m->lock, flags);
-			goto check_current_pg;
-		}
-		m->next_pg = NULL;
-		spin_unlock_irqrestore(&m->lock, flags);
-		pgpath = choose_path_in_pg(m, pg, nr_bytes);
-		if (!IS_ERR_OR_NULL(pgpath))
-			return pgpath;
-	}
-
 	/* Don't change PG until it has no remaining paths */
-check_current_pg:
 	pg = READ_ONCE(m->current_pg);
 	if (pg) {
 		pgpath = choose_path_in_pg(m, pg, nr_bytes);
@@ -437,6 +423,21 @@ check_current_pg:
 			return pgpath;
 	}
 
+	/* Were we instructed to switch PG? */
+	if (READ_ONCE(m->next_pg)) {
+		spin_lock_irqsave(&m->lock, flags);
+		pg = m->next_pg;
+		if (!pg) {
+			spin_unlock_irqrestore(&m->lock, flags);
+			goto check_all_pgs;
+		}
+		m->next_pg = NULL;
+		spin_unlock_irqrestore(&m->lock, flags);
+		pgpath = choose_path_in_pg(m, pg, nr_bytes);
+		if (!IS_ERR_OR_NULL(pgpath))
+			return pgpath;
+	}
+check_all_pgs:
 	/*
 	 * Loop through priority groups until we find a valid path.
 	 * First time we skip PGs marked 'bypassed'.
@@ -1439,15 +1440,19 @@ static int action_dev(struct multipath *m, dev_t dev, action_fn action)
  * Temporarily try to avoid having to use the specified PG
  */
 static void bypass_pg(struct multipath *m, struct priority_group *pg,
-		      bool bypassed)
+		      bool bypassed, bool can_be_delayed)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&m->lock, flags);
 
 	pg->bypassed = bypassed;
-	m->current_pgpath = NULL;
-	m->current_pg = NULL;
+	if (can_be_delayed && test_bit(MPATHF_DELAY_PG_SWITCH, &m->flags))
+		set_bit(MPATHF_NEED_PG_SWITCH, &m->flags);
+	else {
+		m->current_pgpath = NULL;
+		m->current_pg = NULL;
+	}
 
 	spin_unlock_irqrestore(&m->lock, flags);
 
@@ -1476,8 +1481,12 @@ static int switch_pg_num(struct multipath *m, const char *pgstr)
 		if (--pgnum)
 			continue;
 
-		m->current_pgpath = NULL;
-		m->current_pg = NULL;
+		if (test_bit(MPATHF_DELAY_PG_SWITCH, &m->flags))
+			set_bit(MPATHF_NEED_PG_SWITCH, &m->flags);
+		else {
+			m->current_pgpath = NULL;
+			m->current_pg = NULL;
+		}
 		m->next_pg = pg;
 	}
 	spin_unlock_irqrestore(&m->lock, flags);
@@ -1507,7 +1516,7 @@ static int bypass_pg_num(struct multipath *m, const char *pgstr, bool bypassed)
 			break;
 	}
 
-	bypass_pg(m, pg, bypassed);
+	bypass_pg(m, pg, bypassed, true);
 	return 0;
 }
 
@@ -1561,7 +1570,7 @@ static void pg_init_done(void *data, int errors)
 		 * Probably doing something like FW upgrade on the
 		 * controller so try the other pg.
 		 */
-		bypass_pg(m, pg, true);
+		bypass_pg(m, pg, true, false);
 		break;
 	case SCSI_DH_RETRY:
 		/* Wait before retrying. */
@@ -1845,10 +1854,10 @@ static void multipath_status(struct dm_target *ti, status_type_t type,
 
 	DMEMIT("%u ", m->nr_priority_groups);
 
-	if (m->next_pg)
-		pg_num = m->next_pg->pg_num;
-	else if (m->current_pg)
+	if (m->current_pg)
 		pg_num = m->current_pg->pg_num;
+	else if (m->next_pg)
+		pg_num = m->next_pg->pg_num;
 	else
 		pg_num = (m->nr_priority_groups ? 1 : 0);
 
@@ -2081,9 +2090,12 @@ static int probe_active_paths(struct multipath *m)
 	unsigned long flags;
 	int r = 0;
 
-	mutex_lock(&m->work_mutex);
-
 	spin_lock_irqsave(&m->lock, flags);
+	/* Only one process can call probe_active_paths() at a time */
+	if (test_and_set_bit(MPATHF_DELAY_PG_SWITCH, &m->flags)) {
+		spin_unlock_irqrestore(&m->lock, flags);
+		return -EBUSY;
+	}
 	if (test_bit(MPATHF_QUEUE_IO, &m->flags))
 		pg = NULL;
 	else
@@ -2105,7 +2117,13 @@ static int probe_active_paths(struct multipath *m)
 		r = -ENOTCONN;
 
 out:
-	mutex_unlock(&m->work_mutex);
+	spin_lock_irqsave(&m->lock, flags);
+	clear_bit(MPATHF_DELAY_PG_SWITCH, &m->flags);
+	if (test_and_clear_bit(MPATHF_NEED_PG_SWITCH, &m->flags)) {
+		m->current_pgpath = NULL;
+		m->current_pg = NULL;
+	}
+	spin_unlock_irqrestore(&m->lock, flags);
 	return r;
 }
 
