@@ -79,6 +79,7 @@ struct multipath {
 	struct pgpath *current_pgpath;
 	struct priority_group *current_pg;
 	struct priority_group *next_pg;	/* Switch to this PG if set */
+	struct priority_group *last_probed_pg;
 
 	atomic_t nr_valid_paths;	/* Total number of usable paths */
 	unsigned int nr_priority_groups;
@@ -87,6 +88,7 @@ struct multipath {
 	const char *hw_handler_name;
 	char *hw_handler_params;
 	wait_queue_head_t pg_init_wait;	/* Wait for pg_init completion */
+	wait_queue_head_t probe_wait;   /* Wait for probing paths */
 	unsigned int pg_init_retries;	/* Number of times to retry pg_init */
 	unsigned int pg_init_delay_msecs;	/* Number of msecs before pg_init retry */
 	atomic_t pg_init_in_progress;	/* Only one pg_init allowed at once */
@@ -100,6 +102,7 @@ struct multipath {
 	struct bio_list queued_bios;
 
 	struct timer_list nopath_timer;	/* Timeout for queue_if_no_path */
+	bool is_suspending;
 };
 
 /*
@@ -256,6 +259,7 @@ static int alloc_multipath_stage2(struct dm_target *ti, struct multipath *m)
 	atomic_set(&m->pg_init_count, 0);
 	m->pg_init_delay_msecs = DM_PG_INIT_DELAY_DEFAULT;
 	init_waitqueue_head(&m->pg_init_wait);
+	init_waitqueue_head(&m->probe_wait);
 
 	return 0;
 }
@@ -1750,7 +1754,11 @@ done:
 static void multipath_presuspend(struct dm_target *ti)
 {
 	struct multipath *m = ti->private;
+	unsigned long flags;
 
+	spin_lock_irqsave(&m->lock, flags);
+	m->is_suspending = true;
+	spin_unlock_irqrestore(&m->lock, flags);
 	/* FIXME: bio-based shouldn't need to always disable queue_if_no_path */
 	if (m->queue_mode == DM_TYPE_BIO_BASED || !dm_noflush_suspending(m->ti))
 		queue_if_no_path(m, false, true, __func__);
@@ -1774,6 +1782,7 @@ static void multipath_resume(struct dm_target *ti)
 	unsigned long flags;
 
 	spin_lock_irqsave(&m->lock, flags);
+	m->is_suspending = false;
 	if (test_bit(MPATHF_SAVED_QUEUE_IF_NO_PATH, &m->flags)) {
 		set_bit(MPATHF_QUEUE_IF_NO_PATH, &m->flags);
 		clear_bit(MPATHF_SAVED_QUEUE_IF_NO_PATH, &m->flags);
@@ -2086,35 +2095,41 @@ out:
 static int probe_active_paths(struct multipath *m)
 {
 	struct pgpath *pgpath;
-	struct priority_group *pg;
+	struct priority_group *pg = NULL;
 	unsigned long flags;
 	int r = 0;
 
 	spin_lock_irqsave(&m->lock, flags);
-	/* Only one process can call probe_active_paths() at a time */
-	if (test_and_set_bit(MPATHF_DELAY_PG_SWITCH, &m->flags)) {
-		spin_unlock_irqrestore(&m->lock, flags);
-		return -EBUSY;
+	if (test_bit(MPATHF_DELAY_PG_SWITCH, &m->flags)) {
+		wait_event_lock_irq(m->probe_wait,
+				    !test_bit(MPATHF_DELAY_PG_SWITCH, &m->flags),
+				    m->lock);
+		/*
+		 * if we waited because a probe was already in progress,
+		 * and it probed the current active pathgroup, don't
+		 * reprobe. Just return the number of valid paths
+		 */
+		if (m->current_pg == m->last_probed_pg)
+			goto skip_probe;
 	}
-	if (test_bit(MPATHF_QUEUE_IO, &m->flags))
-		pg = NULL;
-	else
-		pg = m->current_pg;
+	if (!m->current_pg || m->is_suspending ||
+	    test_bit(MPATHF_QUEUE_IO, &m->flags))
+		goto skip_probe;
+	set_bit(MPATHF_DELAY_PG_SWITCH, &m->flags);
+	pg = m->last_probed_pg = m->current_pg;
 	spin_unlock_irqrestore(&m->lock, flags);
 
-	if (pg) {
-		list_for_each_entry(pgpath, &pg->pgpaths, list) {
-			if (!pgpath->is_active)
-				continue;
+	list_for_each_entry(pgpath, &pg->pgpaths, list) {
+		if (pg != READ_ONCE(m->current_pg) ||
+		    READ_ONCE(m->is_suspending))
+			goto out;
+		if (!pgpath->is_active)
+			continue;
 
-			r = probe_path(pgpath);
-			if (r < 0)
-				goto out;
-		}
+		r = probe_path(pgpath);
+		if (r < 0)
+			goto out;
 	}
-
-	if (!atomic_read(&m->nr_valid_paths))
-		r = -ENOTCONN;
 
 out:
 	spin_lock_irqsave(&m->lock, flags);
@@ -2123,7 +2138,12 @@ out:
 		m->current_pgpath = NULL;
 		m->current_pg = NULL;
 	}
+skip_probe:
+	if (r == 0 && !atomic_read(&m->nr_valid_paths))
+		r = -ENOTCONN;
 	spin_unlock_irqrestore(&m->lock, flags);
+	if (pg)
+		wake_up(&m->probe_wait);
 	return r;
 }
 
