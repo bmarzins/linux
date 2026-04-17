@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# dm-compress configuration
+#
+
+config DM_COMPRESS
+	tristate "Compression target"
+	depends on BLK_DEV_DM
+	select DM_BUFIO
+	select CRYPTO_DEFLATE
+	select CRYPTO_LZO
+	select CRYPTO_842
+	select CRYPTO_LZ4
+	select CRYPTO_LZ4HC
+	select CRYPTO_ZSTD
+	help
+	  This target stores compressed data.

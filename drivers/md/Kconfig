@@ -694,4 +694,6 @@ source "drivers/md/dm-vdo/Kconfig"
 
 source "drivers/md/dm-pcache/Kconfig"
 
+source "drivers/md/dm-compress/Kconfig"
+
 endif # MD
