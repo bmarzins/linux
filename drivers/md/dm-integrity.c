@@ -5430,6 +5430,12 @@ try_smaller_buffer:
 		if (r)
 			goto bad;
 
+		/*
+		 * initialize journal accounting like a cleared journal, to
+		 * handle a changed superblock on resume, where the journal
+		 * is not replayed.
+		 */
+		ic->free_sectors = ic->journal_entries;
 	}
 
 	if (ic->mode == 'B') {
