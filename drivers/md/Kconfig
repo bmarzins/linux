@@ -555,6 +555,14 @@ config DM_FLAKEY
 	help
 	 A target that intermittently fails I/O for debugging purposes.
 
+config DM_RQLINEAR
+	tristate "RQ linear target"
+	depends on BLK_DEV_DM
+	help
+	A request-based linear target
+
+	If unsure, say N.
+
 config DM_VERITY
 	tristate "Verity target support"
 	depends on BLK_DEV_DM
